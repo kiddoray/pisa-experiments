@@ -7,3 +7,5 @@ results/
 .DS_Store
 models/depth_anything_v2_vits.pth
 models/sam2.1_hiera_large.pt
+sim_output/
+examples

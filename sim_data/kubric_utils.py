@@ -54,6 +54,8 @@ def get_object_metadata(obj: kb.Object3D) -> dict:
     metadata["scale"] = obj.scale.tolist()
     metadata["mass"] = obj.mass
     metadata["friction"] = obj.friction
+    metadata["velocity"] = obj.velocity.tolist() if obj.velocity is not None else None
+    metadata["angular_velocity"] = obj.angular_velocity.tolist() if obj.angular_velocity is not None else None
     return metadata
 
 def get_camera_metadata(camera: kb.Camera) -> dict:

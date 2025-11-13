@@ -1,11 +1,22 @@
-python sim_data/run.py \
-    --video_id=00000 \
+KUBRIC_USE_GPU=1 python sim_data/run.py \
+    --video_id=00049 \
     --output_dir=sim_output \
-    --scenario="fall" \
+    --scenario="combined" \
     --resolution=512x512 \
     --num_threads=8 \
     --save_mp4 \
     --save_gif \
     --objects_split train \
     --backgrounds_split train \
-    --seed 0
+    --seed 0 \
+    --frame_rate 16 \
+    --frame_end 32 \
+    --num_views 1 \
+    --view_sampling="circle" \
+    --ground_mode="textured" \
+    --background_mode="dome" \
+    --enable_physics_ground \
+    --ground_texture /home/kiddoray/pisa-experiments/plank_flooring_04_4k.blend/textures/plank_flooring_04_diff_4k.jpg \
+    --ground_normal /home/kiddoray/pisa-experiments/plank_flooring_04_4k.blend/textures/plank_flooring_04_nor_gl_4k.exr \
+    --ground_roughness /home/kiddoray/pisa-experiments/plank_flooring_04_4k.blend/textures/plank_flooring_04_rough_4k.exr \
+    --ground_displacement /home/kiddoray/pisa-experiments/plank_flooring_04_4k.blend/textures/plank_flooring_04_disp_4k.png \
