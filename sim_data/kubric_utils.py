@@ -32,14 +32,29 @@ def project_points_to_image(points, scene):
     points_image = (points_image_h[:, :2] / points_image_h[:, 2][:, np.newaxis]) * np.array([w, h])
     return points_image.astype(int)
 
+# def get_world_object_bounds(obj: kb.Object3D) -> Tuple[np.ndarray, np.ndarray]:
+    # position = obj.position
+    # local_min_corner, local_max_corner = get_local_object_bounds(obj)
+    # min_corner = position + local_min_corner
+    # max_corner = position + local_max_corner
+    # return min_corner, max_corner
+
 def get_world_object_bounds(obj: kb.Object3D) -> Tuple[np.ndarray, np.ndarray]:
-    position = obj.position
-    local_min_corner, local_max_corner = get_local_object_bounds(obj)
-    min_corner = position + local_min_corner
-    max_corner = position + local_max_corner
-    return min_corner, max_corner
+    """Get world-space axis-aligned bounding box, correctly handling rotation.
+    
+    Uses obj.aabbox which properly accounts for scale and rotation.
+    """
+    # obj.aabbox returns [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+    # and already includes position, scale, and rotation
+    aabbox = obj.aabbox
+    return aabbox[0], aabbox[1]
 
 def get_local_object_bounds(obj: kb.Object3D) -> Tuple[np.ndarray, np.ndarray]:
+    """Get local-space axis-aligned bounding box (scaled but NOT rotated).
+    
+    Note: This does NOT account for rotation. Use get_world_object_bounds for 
+    accurate world-space bounds when the object has non-identity rotation.
+    """
     min_bound, max_bound = obj.bounds
     scale = obj.scale
     min_corner = min_bound*scale
