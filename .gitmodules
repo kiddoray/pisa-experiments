@@ -6,4 +6,5 @@
 	url = https://github.com/DepthAnything/Depth-Anything-V2.git
 [submodule "kubric"]
 	path = kubric
-	url = https://github.com/google-research/kubric.git
+	# url = https://github.com/google-research/kubric.git
+	url = https://github.com/kiddoray/kubric.git
