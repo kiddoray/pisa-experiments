@@ -5,18 +5,25 @@ import sys
 # =============================================================================
 # GPU SELECTION - MUST BE SET BEFORE IMPORTING BPY/BLENDER
 # =============================================================================
-# For Eevee: Use CUDA_VISIBLE_DEVICES to hide other GPUs from the process
+# For Eevee: We need to set EGL device selection before Blender initializes
 # For Cycles: Use KUBRIC_GPU_ID to select specific GPU within Blender
 #
 # KUBRIC_GPU_ID: Which GPU index Blender should use (for Cycles)
-# CUDA_VISIBLE_DEVICES: Which GPUs are visible to the process (for Eevee)
+# CUDA_VISIBLE_DEVICES: Which GPUs are visible to the process
 #
-# If KUBRIC_GPU_ID is set but CUDA_VISIBLE_DEVICES is not, we auto-set it
-# so that Eevee also uses the correct GPU
-if "KUBRIC_GPU_ID" in os.environ and "CUDA_VISIBLE_DEVICES" not in os.environ:
-    gpu_id = os.environ["KUBRIC_GPU_ID"]
-    os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
-    print(f"[GPU Setup] Auto-setting CUDA_VISIBLE_DEVICES={gpu_id} based on KUBRIC_GPU_ID")
+# For Eevee with EGL (headless), use __EGL_DEVICE_ID to select GPU
+# This must be set before bpy is imported
+
+# if "KUBRIC_GPU_ID" in os.environ:
+#     gpu_id = os.environ["KUBRIC_GPU_ID"]
+#     # Set CUDA_VISIBLE_DEVICES if not already set
+#     if "CUDA_VISIBLE_DEVICES" not in os.environ:
+#         os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
+#         print(f"[GPU Setup] Auto-setting CUDA_VISIBLE_DEVICES={gpu_id} based on KUBRIC_GPU_ID")
+#     # Set EGL device ID for Eevee headless rendering
+#     if "__EGL_DEVICE_ID" not in os.environ:
+#         os.environ["__EGL_DEVICE_ID"] = gpu_id
+#         print(f"[GPU Setup] Auto-setting __EGL_DEVICE_ID={gpu_id} for Eevee EGL rendering")
 
 # Ensure Kubric uses GPU
 if "KUBRIC_USE_GPU" not in os.environ:
@@ -24,6 +31,35 @@ if "KUBRIC_USE_GPU" not in os.environ:
 
 import pyquaternion as pyquat
 import bpy
+
+# =============================================================================
+# EEVEE GPU DEVICE SELECTION (after bpy import)
+# =============================================================================
+# def setup_eevee_gpu():
+#     """Configure Eevee to use specific GPU device."""
+#     try:
+#         prefs = bpy.context.preferences.system
+#         # Get available GPU devices for Eevee
+#         # In Blender 4.x, Eevee uses the system's OpenGL/Vulkan device
+#         # The device selection depends on the GPU backend
+        
+#         gpu_backend = getattr(prefs, 'gpu_backend', None)
+#         print(f"[GPU Setup] Blender GPU backend: {gpu_backend}")
+        
+#         # Log available compute devices
+#         cycles_prefs = bpy.context.preferences.addons.get('cycles')
+#         if cycles_prefs:
+#             cycles_prefs = cycles_prefs.preferences
+#             cycles_prefs.get_devices()
+#             print("[GPU Setup] Available GPU devices:")
+#             for i, dev in enumerate(cycles_prefs.devices):
+#                 print(f"  [{i}] {dev.name} (type={dev.type}, use={dev.use})")
+#     except Exception as e:
+#         print(f"[GPU Setup] Warning: Could not configure Eevee GPU: {e}")
+
+# # Call setup after bpy import
+# setup_eevee_gpu()
+
 # print("Rendering Engine:", bpy.context.scene.render.engine)
 from mathutils import Vector, Matrix, Quaternion, Euler
 import hashlib
@@ -180,6 +216,45 @@ parser.add_argument(
     default=0.1,
     help="Margin (m) beyond the dynamic spawn region to place offscreen entrants"
 )
+
+# Slope scenario parameters
+parser.add_argument(
+    "--slope_angle_deg",
+    type=float,
+    default=25.0,
+    help="Slope angle in degrees (default: 25)"
+)
+parser.add_argument(
+    "--slope_length",
+    type=float,
+    default=3.0,
+    help="Length of the slope along the incline direction in meters (default: 3.0)"
+)
+parser.add_argument(
+    "--slope_width",
+    type=float,
+    default=2.0,
+    help="Width of the slope perpendicular to incline in meters (default: 2.0)"
+)
+parser.add_argument(
+    "--slope_thickness",
+    type=float,
+    default=0.08,
+    help="Thickness of the slope panel in meters (default: 0.08)"
+)
+parser.add_argument(
+    "--slope_friction",
+    type=float,
+    default=0.3,
+    help="Friction coefficient of the slope surface (default: 0.3, lower = more slippery)"
+)
+parser.add_argument(
+    "--slope_restitution",
+    type=float,
+    default=0.1,
+    help="Restitution (bounciness) of the slope surface (default: 0.1)"
+)
+
 parser.add_argument(
     "--video_id",
     type=str,
@@ -1792,178 +1867,374 @@ class Intuitive:
         return objs
        
     def add_slope(self):
-        """Create a static inclined plane (slope) that objects can slide down.
+        """Create a static inclined plane (slope) using Blender native mesh.
+        
+        Since Kubric only supports uniform scaling, we create the slope directly
+        in Blender with proper non-uniform dimensions, then wrap it for physics.
 
         Parameters (read from self.args with defaults):
-        - slope_angle_deg: tilt angle in degrees (default 20)
-        - slope_length: along the rising direction (default 4.0 m)
-        - slope_width: perpendicular width (default 2.0 m)
-        - slope_thickness: slab thickness (default 0.05 m)
-        - slope_axis: 'x' or 'y' direction of ascent (default 'x')
-        - slope_position: center position tuple (default (0, 0, 0.05))
-        - slope_friction, slope_restitution: dynamics (defaults 0.8, 0.0)
-        - slope_visible: if False, hide from rendering (default True)
-        Returns the created Kubric object or None on failure.
+        - slope_angle_deg: tilt angle in degrees (default 25)
+        - slope_length: length along the slope direction (default 3.0 m)
+        - slope_width: width perpendicular to slope (default 2.0 m)
+        - slope_thickness: slab thickness (default 0.1 m)
+        - slope_friction: lateral friction coefficient (default 0.3)
+        - slope_restitution: bounciness (default 0.1)
+        
+        Returns the created slope object or None on failure.
         """
         try:
-            angle_deg = float(getattr(self.args, 'slope_angle_deg', 20.0))
+            angle_deg = float(getattr(self.args, 'slope_angle_deg', 25.0))
         except Exception:
-            angle_deg = 20.0
+            angle_deg = 25.0
         angle_rad = float(np.deg2rad(angle_deg))
-        L = float(getattr(self.args, 'slope_length', 4.0))
+        
+        L = float(getattr(self.args, 'slope_length', 3.0))
         W = float(getattr(self.args, 'slope_width', 2.0))
-        T = float(getattr(self.args, 'slope_thickness', 0.05))
-        axis = str(getattr(self.args, 'slope_axis', 'x')).lower()
-        pos = getattr(self.args, 'slope_position', (0.0, 0.0, max(0.02, T*0.5)))
-        mu = float(getattr(self.args, 'slope_friction', 0.8))
-        e = float(getattr(self.args, 'slope_restitution', 0.0))
-        visible = bool(getattr(self.args, 'slope_visible', True))
-
+        T = float(getattr(self.args, 'slope_thickness', 0.1))
+        mu = float(getattr(self.args, 'slope_friction', 0.3))
+        e = float(getattr(self.args, 'slope_restitution', 0.1))
+        
+        # =====================================================================
+        # Create slope using Blender native mesh (supports non-uniform scale)
+        # =====================================================================
         try:
-            slope = kb.Cube(name="slope",
-                            scale=(L, W, T),
-                            friction=mu,
-                            restitution=e,
-                            static=True)
-        except Exception:
-            # fallback for different kubric import styles
-            slope = kb.core.Cube(name="slope",
-                                 scale=(L, W, T),
-                                 friction=mu,
-                                 restitution=e,
-                                 static=True)
-
-        # Place and rotate the slope
+            # Create a cube in Blender with size 1, then scale non-uniformly
+            bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0, 0, 0))
+            slope_bl = bpy.context.active_object
+            slope_bl.name = "slope_panel"
+            
+            # Apply non-uniform scale: X=length, Y=width, Z=thickness
+            slope_bl.scale = (L, W, T)
+            # Apply the scale to mesh data
+            bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+            
+            # Position: low end at x~0, z=0
+            # Center of tilted cube: 
+            #   center_x = (L/2) * cos(angle) (so low end is near origin)
+            #   center_z = (L/2) * sin(angle) + (T/2) * cos(angle)
+            center_x = (L / 2.0) * np.cos(angle_rad)
+            center_y = 0.0
+            center_z = (L / 2.0) * np.sin(angle_rad) + (T / 2.0) * np.cos(angle_rad)
+            
+            slope_bl.location = (float(center_x), float(center_y), float(center_z))
+            
+            # Rotate around Y-axis to create the incline
+            # Positive angle tilts the +X end up
+            slope_bl.rotation_euler = Euler((0.0, -angle_rad, 0.0), 'XYZ')
+            
+            # =====================================================================
+            # Apply random material for variety
+            # =====================================================================
+            material_types = ['metal', 'wood', 'rubber', 'stone', 'plastic', 'concrete']
+            material_type = self.rng.choice(material_types)
+            
+            mat = bpy.data.materials.new(name=f"SlopeMaterial_{material_type}")
+            mat.use_nodes = True
+            nodes = mat.node_tree.nodes
+            links = mat.node_tree.links
+            bsdf = nodes.get("Principled BSDF")
+            
+            # Default friction (will be overwritten based on material type)
+            mu = float(self.rng.uniform(0.3, 0.5))
+            
+            if bsdf:
+                if material_type == 'metal':
+                    # Metallic surface - steel/aluminum look
+                    metal_colors = [
+                        (0.7, 0.7, 0.75, 1.0),   # Steel
+                        (0.85, 0.65, 0.45, 1.0), # Copper
+                        (0.9, 0.85, 0.5, 1.0),   # Gold/Brass
+                        (0.6, 0.6, 0.65, 1.0),   # Dark steel
+                    ]
+                    color = metal_colors[self.rng.randint(0, len(metal_colors))]
+                    bsdf.inputs["Base Color"].default_value = color
+                    bsdf.inputs["Metallic"].default_value = 1.0
+                    bsdf.inputs["Roughness"].default_value = float(self.rng.uniform(0.1, 0.4))
+                    # Adjust friction for metal
+                    mu = float(self.rng.uniform(0.15, 0.3))
+                    
+                elif material_type == 'wood':
+                    # Wooden surface - brown tones
+                    wood_colors = [
+                        (0.4, 0.25, 0.12, 1.0),  # Dark wood
+                        (0.6, 0.4, 0.2, 1.0),    # Medium wood
+                        (0.75, 0.55, 0.35, 1.0), # Light wood
+                        (0.35, 0.2, 0.1, 1.0),   # Walnut
+                    ]
+                    color = wood_colors[self.rng.randint(0, len(wood_colors))]
+                    bsdf.inputs["Base Color"].default_value = color
+                    bsdf.inputs["Metallic"].default_value = 0.0
+                    bsdf.inputs["Roughness"].default_value = float(self.rng.uniform(0.4, 0.7))
+                    mu = float(self.rng.uniform(0.3, 0.5))
+                    
+                elif material_type == 'rubber':
+                    # Rubber surface - dark, matte
+                    rubber_colors = [
+                        (0.05, 0.05, 0.05, 1.0), # Black rubber
+                        (0.15, 0.15, 0.15, 1.0), # Dark gray
+                        (0.1, 0.05, 0.02, 1.0),  # Dark brown
+                    ]
+                    color = rubber_colors[self.rng.randint(0, len(rubber_colors))]
+                    bsdf.inputs["Base Color"].default_value = color
+                    bsdf.inputs["Metallic"].default_value = 0.0
+                    bsdf.inputs["Roughness"].default_value = float(self.rng.uniform(0.7, 0.95))
+                    mu = float(self.rng.uniform(0.6, 0.9))  # High friction
+                    
+                elif material_type == 'stone':
+                    # Stone/marble surface
+                    stone_colors = [
+                        (0.5, 0.5, 0.5, 1.0),    # Gray stone
+                        (0.8, 0.75, 0.7, 1.0),   # Light marble
+                        (0.35, 0.35, 0.35, 1.0), # Dark stone
+                        (0.6, 0.55, 0.5, 1.0),   # Sandstone
+                    ]
+                    color = stone_colors[self.rng.randint(0, len(stone_colors))]
+                    bsdf.inputs["Base Color"].default_value = color
+                    bsdf.inputs["Metallic"].default_value = 0.0
+                    bsdf.inputs["Roughness"].default_value = float(self.rng.uniform(0.3, 0.6))
+                    mu = float(self.rng.uniform(0.4, 0.6))
+                    
+                elif material_type == 'plastic':
+                    # Colorful plastic
+                    plastic_colors = [
+                        (0.8, 0.2, 0.2, 1.0),    # Red
+                        (0.2, 0.6, 0.8, 1.0),    # Blue
+                        (0.2, 0.7, 0.3, 1.0),    # Green
+                        (0.9, 0.7, 0.1, 1.0),    # Yellow
+                        (0.9, 0.9, 0.9, 1.0),    # White
+                    ]
+                    color = plastic_colors[self.rng.randint(0, len(plastic_colors))]
+                    bsdf.inputs["Base Color"].default_value = color
+                    bsdf.inputs["Metallic"].default_value = 0.0
+                    bsdf.inputs["Roughness"].default_value = float(self.rng.uniform(0.2, 0.5))
+                    # Try different specular input names for Blender version compatibility
+                    # Blender 3.x uses "Specular", Blender 4.x uses "Specular IOR Level"
+                    try:
+                        bsdf.inputs["Specular"].default_value = 0.5
+                    except KeyError:
+                        try:
+                            bsdf.inputs["Specular IOR Level"].default_value = 0.5
+                        except KeyError:
+                            pass  # Skip if neither exists
+                    mu = float(self.rng.uniform(0.25, 0.45))
+                    
+                else:  # concrete
+                    # Concrete surface - gray tones
+                    concrete_colors = [
+                        (0.45, 0.45, 0.45, 1.0), # Medium gray
+                        (0.55, 0.55, 0.52, 1.0), # Light gray
+                        (0.35, 0.35, 0.35, 1.0), # Dark gray
+                    ]
+                    color = concrete_colors[self.rng.randint(0, len(concrete_colors))]
+                    bsdf.inputs["Base Color"].default_value = color
+                    bsdf.inputs["Metallic"].default_value = 0.0
+                    bsdf.inputs["Roughness"].default_value = float(self.rng.uniform(0.6, 0.9))
+                    mu = float(self.rng.uniform(0.5, 0.7))
+            
+            slope_bl.data.materials.append(mat)
+            
+            # Store material type for logging
+            self._slope_material_type = material_type
+            
+            logging.info(f"Created Blender slope mesh: size=({L}x{W}x{T}), angle={angle_deg}°, material={material_type}")
+            
+        except Exception as ex:
+            logging.error(f"Failed to create slope in Blender: {ex}")
+            return None
+        
+        # =====================================================================
+        # Create a Kubric wrapper for physics simulation
+        # =====================================================================
         try:
-            slope.position = tuple(pos)
-        except Exception:
-            pass
+            # Create a simple static cube from kubasic with uniform scale=1
+            # We'll override its Blender mesh with our custom slope
+            slope_kb = self.kubasic.create(
+                asset_id="cube",
+                name="slope_physics",
+                scale=1.0,  # Uniform scale only!
+                static=True,
+            )
+            slope_kb.friction = mu
+            slope_kb.restitution = e
+            
+            # Add to scene
+            self.scene.add(slope_kb)
+            
+            # Get the kubric object's Blender mesh and hide it
+            kb_bl = slope_kb.linked_objects[self.renderer]
+            kb_bl.hide_render = True
+            kb_bl.hide_viewport = True
+            
+            # The visual slope is separate; we need to link physics properly
+            # For physics, we use the kubric object but position it to match
+            slope_kb.position = (float(center_x), float(center_y), float(center_z))
+            
+            # Set rotation
+            q = pyquat.Quaternion(axis=(0.0, 1.0, 0.0), angle=-angle_rad)
+            slope_kb.quaternion = (q.w, q.x, q.y, q.z)
+            
+        except Exception as ex:
+            logging.warning(f"Failed to create kubric physics wrapper: {ex}")
+            slope_kb = None
+        
+        # =====================================================================
+        # Create physics collider using PyBullet directly
+        # =====================================================================
         try:
-            axis_vec = (1.0, 0.0, 0.0) if axis.startswith('x') else (0.0, 1.0, 0.0)
-            # Rotate so that the plane ascends along +axis (tilt around perpendicular axis)
-            rot_axis = (0.0, 1.0, 0.0) if axis.startswith('x') else (1.0, 0.0, 0.0)
-            q = pyquat.Quaternion(axis=rot_axis, angle=angle_rad)
-            # Kubric objects typically accept (w, x, y, z)
-            slope.quaternion = (q.w, q.x, q.y, q.z)
-        except Exception:
-            # Try Blender-level rotation as a fallback
-            try:
-                bl = slope.linked_objects[self.renderer]
-                if axis.startswith('x'):
-                    bl.rotation_euler = Euler((0.0, angle_rad, 0.0), "XYZ")
-                else:
-                    bl.rotation_euler = Euler((angle_rad, 0.0, 0.0), "XYZ")
-            except Exception:
-                pass
+            import pybullet as p
+            client = self.simulator._physics_client
+            
+            # Create a box collision shape with proper dimensions
+            half_extents = [L/2.0, W/2.0, T/2.0]
+            collision_shape = client.createCollisionShape(
+                p.GEOM_BOX,
+                halfExtents=half_extents
+            )
+            
+            # Create the rigid body at the correct position and orientation
+            # Convert quaternion for PyBullet (x, y, z, w format)
+            q = pyquat.Quaternion(axis=(0.0, 1.0, 0.0), angle=-angle_rad)
+            quat_pybullet = [q.x, q.y, q.z, q.w]
+            
+            body_id = client.createMultiBody(
+                baseMass=0,  # static
+                baseCollisionShapeIndex=collision_shape,
+                basePosition=[center_x, center_y, center_z],
+                baseOrientation=quat_pybullet
+            )
+            
+            # Set friction and restitution
+            client.changeDynamics(
+                body_id, -1,
+                lateralFriction=mu,
+                restitution=e
+            )
+            
+            self._slope_body_id = body_id
+            logging.info(f"Created PyBullet slope collider: body_id={body_id}, friction={mu}")
+            
+        except Exception as ex:
+            logging.error(f"Failed to create PyBullet slope collider: {ex}")
+            self._slope_body_id = None
+        
+        # =====================================================================
+        # Store parameters for object placement
+        # =====================================================================
+        # High point of the slope surface (top face)
+        high_x = center_x + (L / 2.0) * np.cos(angle_rad)
+        high_z = L * np.sin(angle_rad) + T * np.cos(angle_rad)
+        low_x = center_x - (L / 2.0) * np.cos(angle_rad)
+        low_z = T * np.cos(angle_rad)
+        
+        self._slope_obj = slope_bl  # Store Blender object for reference
+        self._slope_kb = slope_kb   # Kubric wrapper (may be None)
+        self._slope_params = {
+            'angle_rad': angle_rad,
+            'angle_deg': angle_deg,
+            'L': L,
+            'W': W,
+            'T': T,
+            'center': (center_x, center_y, center_z),
+            'high_point': (high_x, 0.0, high_z),
+            'low_point': (low_x, 0.0, low_z),
+            'mu': mu,
+        }
+        
+        logging.info(f"Added slope: angle={angle_deg}°, size=({L}x{W}x{T}), "
+                     f"center=({center_x:.2f}, {center_y:.2f}, {center_z:.2f}), "
+                     f"high_z={high_z:.2f}m, friction={mu}")
+        
+        return slope_bl
 
-        try:
-            self.scene.add(slope)
-        except Exception:
-            self.scene += slope
+    def place_objects_on_slope(self, slope, count: int | None = None, margin: float = 0.15):
+        """Place dynamic objects at the top of the slope so they slide down naturally.
 
-        # Hide from render if requested
-        if not visible:
-            try:
-                bl = slope.linked_objects[self.renderer]
-                bl.hide_render = True
-                bl.hide_viewport = True
-            except Exception:
-                pass
-
-        # Push dynamics overrides to physics backend if possible
-        try:
-            body_id = slope.linked_objects[self.simulator]
-            self.simulator._physics_client.changeDynamics(int(body_id), -1, lateralFriction=mu, restitution=e)
-        except Exception:
-            pass
-
-        # Store for potential later use
-        try:
-            self._slope_obj = slope
-            self._slope_params = {
-                'angle_rad': angle_rad, 'L': L, 'W': W, 'T': T, 'axis': axis,
-                'position': tuple(getattr(slope, 'position', pos))
-            }
-        except Exception:
-            pass
-
-        logging.info(f"Added slope: angle={angle_deg}deg, size=({L},{W},{T}), axis={axis}, mu={mu}")
-        return slope
-
-    def place_objects_on_slope(self, slope, count: int | None = None, margin: float = 0.1):
-        """Place a number of dynamic objects on the upper part of the slope so they slide down.
-
-        - Computes an approximate surface height using the slope params.
-        - Places objects slightly above the slope top face to avoid initial penetration.
-        - Applies object physics overrides.
+        Objects are positioned near the high end of the slope, slightly above the surface.
         Returns the list of placed objects.
         """
         if slope is None:
+            logging.warning("place_objects_on_slope: slope is None")
             return []
+        
         params = getattr(self, '_slope_params', None)
         if not params:
+            logging.warning("place_objects_on_slope: no slope params found")
             return []
-        angle = float(params['angle_rad'])
+        
+        angle_rad = float(params['angle_rad'])
         L = float(params['L'])
         W = float(params['W'])
         T = float(params['T'])
-        axis = str(params['axis'])
-        cx, cy, cz = params['position']
+        cx, cy, cz = params['center']
+        
         n = int(count if count is not None else max(1, getattr(self, 'num_dynamic_objects', 3)))
-
+        
         objs = []
-        # x spans [-L/2, L/2] around center; choose upper half so they have room to slide down
-        x_min, x_max = -0.5 * L + margin, 0.5 * L - margin
-        y_min, y_max = -0.5 * W + margin, 0.5 * W - margin
-
-        for _ in range(n):
+        
+        # Spawn region: near the high end of the slope (upper portion)
+        # In local slope coordinates, high end is at +L/2
+        # We sample in the upper third of the slope
+        spawn_fraction_min = 0.3  # start from 30% up
+        spawn_fraction_max = 0.9  # up to 90% of the slope length
+        
+        y_min = -W / 2.0 + margin
+        y_max = W / 2.0 - margin
+        
+        for i in range(n):
             attempts = 0
             placed = None
-            while attempts < 12:
+            
+            while attempts < 15:
                 obj_id = self.rng.choice(self.active_object_split)
                 obj = self.gso.create(asset_id=obj_id)
                 self.scene.add(obj)
                 self._apply_object_physics(obj, obj_id)
-
-                # Sample near the high end of the slope (positive along ascent axis)
-                if axis.startswith('x'):
-                    x_rel = self.rng.uniform(0.0, x_max)
-                    y_rel = self.rng.uniform(y_min, y_max)
-                    # Height of the center plane at x_rel (approx): z = cz + x_rel * np.sin(angle)
-                    z_surface = cz + x_rel * np.sin(angle)
-                    px, py = cx + x_rel, cy + y_rel
-                else:
-                    x_rel = self.rng.uniform(x_min, x_max)
-                    y_rel = self.rng.uniform(0.0, y_max)
-                    z_surface = cz + y_rel * np.sin(angle)
-                    px, py = cx + x_rel, cy + y_rel
-
-                # Place object slightly above surface plus half-height offset
-                z_offset = get_object_height_from_center(obj) + 2e-3
-                pz = z_surface + z_offset + 0.5 * T
-                obj.position = (px, py, pz)
-
-                # Quick visibility/overlap check similar to other placements
+                
+                # Sample position along slope (fraction from low to high end)
+                frac = float(self.rng.uniform(spawn_fraction_min, spawn_fraction_max))
+                
+                # Position along slope direction (X in world coords after rotation)
+                # Local slope coordinate: distance from center along slope = (frac - 0.5) * L
+                local_along = (frac - 0.5) * L
+                
+                # World position (slope tilted around Y, so X and Z are affected)
+                # Object sits on top of the slope surface
+                world_x = cx + local_along * np.cos(angle_rad)
+                world_z = cz + local_along * np.sin(angle_rad) + (T / 2.0) * np.cos(angle_rad)
+                
+                # Y position (width direction, unaffected by tilt)
+                world_y = cy + float(self.rng.uniform(y_min, y_max))
+                
+                # Add object height offset so it sits on the surface
+                obj_height = get_object_height_from_center(obj)
+                world_z += obj_height + 0.01  # small gap to avoid penetration
+                
+                obj.position = (float(world_x), float(world_y), float(world_z))
+                
+                # Random rotation
+                obj.quaternion = kb.randomness.random_rotation(rng=self.rng)
+                
+                # Check overlap
+                if self.simulator.check_overlap(obj):
+                    self.scene.remove(obj)
+                    del obj
+                    attempts += 1
+                    continue
+                
+                # Visibility check
                 try:
-                    kb.resample_while(
-                        obj,
-                        [kb.randomness.rotation_sampler(axis=None)],
-                        self.simulator.check_overlap,
-                        rng=self.rng,
-                    )
+                    min_corner, max_corner = get_world_object_bounds(obj)
+                    drop_bounds = np.array([
+                        [min_corner[0], max_corner[1], max_corner[2]],
+                        [min_corner[0], min_corner[1], 0],
+                    ])
+                    projected_points = project_points_to_image(drop_bounds, self.scene)
+                    area = abs((projected_points[0][0] - projected_points[1][0]) *
+                               (projected_points[0][1] - projected_points[1][1]))
+                    coverage = area / (self.scene.resolution[0] * self.scene.resolution[1])
                 except Exception:
-                    pass
-
-                # Minimal visibility requirement
-                min_corner, max_corner = get_world_object_bounds(obj)
-                drop_bounds = np.array([
-                    [min_corner[0], max_corner[1], max_corner[2]],
-                    [min_corner[0], min_corner[1], 0],
-                ])
-                projected_points = project_points_to_image(drop_bounds, self.scene)
-                area = abs((projected_points[0][0] - projected_points[1][0]) *
-                           (projected_points[0][1] - projected_points[1][1]))
-                coverage = area / (self.scene.resolution[0] * self.scene.resolution[1])
+                    coverage = 0.05  # assume visible if check fails
+                
                 if coverage > 0.01:
                     try:
                         obj.metadata["is_dynamic"] = True
@@ -1971,41 +2242,48 @@ class Intuitive:
                         pass
                     placed = obj
                     break
-
-                # Reject and retry
-                try:
-                    self.scene.remove(obj)
-                except Exception:
-                    pass
+                
+                self.scene.remove(obj)
                 del obj
                 attempts += 1
-
+            
+            # Fallback: place even if visibility check failed
             if placed is None:
-                # Keep last attempt even if not visible enough, position above high end
                 obj_id = self.rng.choice(self.active_object_split)
                 placed = self.gso.create(asset_id=obj_id)
                 self.scene.add(placed)
                 self._apply_object_physics(placed, obj_id)
-                if axis.startswith('x'):
-                    x_rel = 0.5 * x_max
-                    y_rel = 0.0
-                    z_surface = cz + x_rel * np.sin(angle)
-                    px, py = cx + x_rel, cy + y_rel
-                else:
-                    x_rel = 0.0
-                    y_rel = 0.5 * y_max
-                    z_surface = cz + y_rel * np.sin(angle)
-                    px, py = cx + x_rel, cy + y_rel
-                z_offset = get_object_height_from_center(placed) + 2e-3
-                pz = z_surface + z_offset + 0.5 * T
-                placed.position = (px, py, pz)
+                
+                # Position at mid-high point
+                frac = 0.7
+                local_along = (frac - 0.5) * L
+                world_x = cx + local_along * np.cos(angle_rad)
+                world_z = cz + local_along * np.sin(angle_rad) + (T / 2.0) * np.cos(angle_rad)
+                world_y = cy
+                obj_height = get_object_height_from_center(placed)
+                world_z += obj_height + 0.01
+                
+                placed.position = (float(world_x), float(world_y), float(world_z))
+                placed.quaternion = kb.randomness.random_rotation(rng=self.rng)
+                
                 try:
                     placed.metadata["is_dynamic"] = True
                 except Exception:
                     pass
-
+            
+            # Enable CCD for smooth collision detection on slope
+            try:
+                body_id = placed.linked_objects[self.simulator]
+                self.simulator._physics_client.changeDynamics(
+                    int(body_id), -1, 
+                    ccdSweptSphereRadius=0.02
+                )
+            except Exception:
+                pass
+            
             objs.append(placed)
-
+            logging.info(f"Placed object {i+1}/{n} on slope at ({placed.position[0]:.2f}, {placed.position[1]:.2f}, {placed.position[2]:.2f})")
+        
         logging.info(f"Placed {len(objs)} dynamic objects on slope")
         return objs
       
@@ -2735,6 +3013,40 @@ class Intuitive:
             )
             self.scene.camera.position = position
 
+    def setup_camera_for_slope(self):
+        """Position camera to observe the slope and sliding objects from a side angle."""
+        params = getattr(self, '_slope_params', None)
+        if not params:
+            return
+        
+        # Get slope dimensions
+        L = params.get('L', 3.0)
+        high_z = params.get('high_point', (0, 0, 1.0))[2]
+        
+        # Position camera to the side of the slope, looking at the middle
+        # Camera should be able to see both the top and bottom of the slope
+        slope_center_x = 0.0
+        slope_center_z = high_z / 2.0
+        
+        # Camera at a 45-degree angle to the side, elevated
+        cam_distance = L * 1.5
+        cam_x = -cam_distance * 0.7
+        cam_y = cam_distance * 0.7  # offset to the side
+        cam_z = max(1.0, high_z * 0.8)
+        
+        self.scene.camera.position = (float(cam_x), float(cam_y), float(cam_z))
+        
+        # Look at the middle of the slope
+        try:
+            self.scene.camera.look_at((slope_center_x, 0.0, slope_center_z))
+        except Exception:
+            pass
+        
+        logging.info(f"Camera positioned for slope view: ({cam_x:.2f}, {cam_y:.2f}, {cam_z:.2f})")
+        
+        # Ensure all objects are visible
+        self.move_camera_back()
+
     def setup_lights(
         self, 
     ):
@@ -2964,7 +3276,7 @@ class Intuitive:
                 self.simulator.run(frame_start=-200, frame_end=0)
 
                 # self.throw_objects = self.place_throw_objects()
-                self.dynamic_objects = self.place_radius_throw_objects(min_radius=1.0, max_radius=2.0, height_range=(0.3,0.6), speed_range=(2.0,4.0))
+                self.dynamic_objects = self.place_radius_throw_objects(min_radius=1.5, max_radius=2.0, height_range=(0.5,0.8), speed_range=(2.0,4.0))
                 # self.dynamic_objects = self.throw_objects
 
                 base, ext = os.path.splitext(args.scene_save_path)
@@ -3074,14 +3386,40 @@ class Intuitive:
         
         # Slope scenario: add slope and let objects slide down
         elif self.args.scenario == 'slope':
+            logging.info("Setting up SLOPE scenario...")
+            
+            # Add the slope structure
             slope = self.add_slope()
-            self.static_objects = []
-            self.dynamic_objects = self.place_objects_on_slope(slope, count=self.num_dynamic_objects)
-            # Small preroll to settle onto slope before rendering window
-            try:
-                self.simulator.run(frame_start=-60, frame_end=0)
-            except Exception:
-                pass
+            if slope is None:
+                logging.error("Failed to create slope, falling back to default scenario")
+                self.static_objects = []
+                self.dynamic_objects = []
+            else:
+                # self.static_objects = [slope]
+                
+                # Place dynamic objects at the top of the slope
+                self.dynamic_objects = self.place_objects_on_slope(
+                    slope, 
+                    count=self.num_dynamic_objects
+                )
+                
+                # # Preroll to let objects settle onto the slope surface
+                # # Use more frames for proper settling
+                # try:
+                #     logging.info("Running preroll simulation to settle objects on slope...")
+                #     self.simulator.run(frame_start=-10, frame_end=0)
+                # except Exception as ex:
+                #     logging.warning(f"Preroll simulation failed: {ex}")
+                
+                # Save scene state if requested
+                base, ext = os.path.splitext(args.scene_save_path)
+                if args.scene_save_path:
+                    save_state(self.renderer, f"{base}_slope_setup{ext}")
+                
+                # Adjust camera for slope view
+                self.setup_camera_for_slope()
+            
+            logging.info(f"Slope scenario setup complete: {len(self.dynamic_objects)} objects on slope")
 
         # fall scenario
         else:

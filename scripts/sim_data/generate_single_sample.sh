@@ -22,10 +22,10 @@
 # CUDA_VISIBLE_DEVICES controls which GPUs the process can see
 # When CUDA_VISIBLE_DEVICES=1, the physical GPU 1 becomes logical GPU 0
 # So we don't need KUBRIC_GPU_ID when using CUDA_VISIBLE_DEVICES
-export CUDA_VISIBLE_DEVICES=1
+# export CUDA_VISIBLE_DEVICES=1
 
 KUBRIC_USE_GPU=1 python sim_data/run_mixed.py \
-    --video_id="1229_combined_fall3" \
+    --video_id="0105_throw_collide" \
     --output_dir=sim_output \
     --resolution=512x512 \
     --num_threads=8 \
@@ -37,7 +37,7 @@ KUBRIC_USE_GPU=1 python sim_data/run_mixed.py \
     --frame_rate 16 \
     --frame_end 64 \
     --scenario="combined" \
-    --stage1="fall" \
+    --stage1="throw" \
     --stage2="mixed" \
     --stage2_speed=6.0 \
     --stage2_force="none" \
@@ -50,7 +50,7 @@ KUBRIC_USE_GPU=1 python sim_data/run_mixed.py \
     --enable_physics_ground \
     --hdri_assets /mnt/solo/kiddoray/HDRI_haven.json \
     --gso_physics_lookup /mnt/solo/kiddoray/GSO_physics.json \
-    --engine eevee \
+    --engine cycles \
     --disable_flow
     # --flow_render_mode split \
     # --disable_flow

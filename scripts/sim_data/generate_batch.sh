@@ -27,6 +27,7 @@ NUM_SAMPLES=100
 GPUS="0,1,2,3"
 PER_GPU=8
 OUTPUT_DIR="sim_output"
+SCENARIO="collision"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -51,6 +52,10 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_DIR="$2"
             shift 2
             ;;
+        --scenario)
+            SCENARIO="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
             exit 1
@@ -63,35 +68,47 @@ IFS=',' read -ra GPU_ARRAY <<< "$GPUS"
 NUM_GPUS=${#GPU_ARRAY[@]}
 TOTAL_WORKERS=$((NUM_GPUS * PER_GPU))
 
-echo "=============================================="
+echo "==============================================" 
 echo "Batch Data Generation"
-echo "=============================================="
+echo "==============================================" 
 echo "Start ID:        $START_ID"
 echo "Num Samples:     $NUM_SAMPLES"
 echo "GPUs:            $GPUS (${NUM_GPUS} GPUs)"
 echo "Per GPU:         $PER_GPU processes"
 echo "Total Workers:   $TOTAL_WORKERS"
+echo "Scenario:        $SCENARIO"
 echo "Output Dir:      $OUTPUT_DIR"
-echo "=============================================="
-
-# Create output directory
+echo "=============================================="# Create output directory
 mkdir -p "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR/logs"
+
+# Record batch start time
+BATCH_START_TIME=$(date +%s)
+BATCH_START_DATETIME=$(date '+%Y-%m-%d %H:%M:%S')
 
 # Function to run a single sample
 run_sample() {
     local sample_id=$1
     local gpu_id=$2
-    local log_file="$OUTPUT_DIR/logs/sample_${sample_id}.log"
+    local log_file="$OUTPUT_DIR/logs/${SCENARIO}_sample_${sample_id}.log"
     
     # Generate unique video_id with timestamp
-    local video_id="sample_$(printf '%06d' $sample_id)"
+    local video_id="${SCENARIO}_sample_$(printf '%06d' $sample_id)"
     
     # Use sample_id as seed for reproducibility
     local seed=$sample_id
     
+    # Record start time
+    local start_time=$(date +%s)
+    
     echo "[$(date '+%H:%M:%S')] Starting sample $sample_id on GPU $gpu_id"
     
+    # GPU selection:
+    # - KUBRIC_GPU_ID: Controls which GPU Blender uses (for Cycles and triggers EGL device for Eevee)
+    # - The run_mixed.py script will automatically set CUDA_VISIBLE_DEVICES and __EGL_DEVICE_ID
+    #   based on KUBRIC_GPU_ID
+    
+    # KUBRIC_GPU_ID=$gpu_id \
     CUDA_VISIBLE_DEVICES=$gpu_id KUBRIC_USE_GPU=1 python sim_data/run_mixed.py \
         --video_id="$video_id" \
         --output_dir="$OUTPUT_DIR" \
@@ -102,8 +119,8 @@ run_sample() {
         --backgrounds_split train \
         --seed "$seed" \
         --frame_rate 16 \
-        --frame_end 64 \
-        --scenario="combined" \
+        --frame_end 32 \
+        --scenario="$SCENARIO" \
         --stage1="throw" \
         --stage2="mixed" \
         --stage2_speed=6.0 \
@@ -122,16 +139,22 @@ run_sample() {
         > "$log_file" 2>&1
     
     local status=$?
+    local end_time=$(date +%s)
+    local elapsed=$((end_time - start_time))
+    local minutes=$((elapsed / 60))
+    local seconds=$((elapsed % 60))
+    
     if [ $status -eq 0 ]; then
-        echo "[$(date '+%H:%M:%S')] ✓ Sample $sample_id completed successfully"
+        echo "[$(date '+%H:%M:%S')] ✓ Sample $sample_id completed in ${minutes}m${seconds}s"
     else
-        echo "[$(date '+%H:%M:%S')] ✗ Sample $sample_id FAILED (exit code: $status)"
+        echo "[$(date '+%H:%M:%S')] ✗ Sample $sample_id FAILED after ${minutes}m${seconds}s (exit code: $status)"
     fi
     return $status
 }
 
 export -f run_sample
 export OUTPUT_DIR
+export SCENARIO
 
 # Generate list of (sample_id, gpu_id) pairs
 # Use GNU parallel or simple background jobs approach
@@ -241,9 +264,33 @@ echo "Output directory: $OUTPUT_DIR"
 echo "Logs: $OUTPUT_DIR/logs/"
 echo "=============================================="
 
+# Calculate total batch time
+BATCH_END_TIME=$(date +%s)
+BATCH_END_DATETIME=$(date '+%Y-%m-%d %H:%M:%S')
+BATCH_DURATION=$((BATCH_END_TIME - BATCH_START_TIME))
+BATCH_HOURS=$((BATCH_DURATION / 3600))
+BATCH_MINUTES=$(((BATCH_DURATION % 3600) / 60))
+BATCH_SECONDS=$((BATCH_DURATION % 60))
+
 # Summary: count successes and failures
-success_count=$(grep -l "completed successfully" "$OUTPUT_DIR/logs/"*.log 2>/dev/null | wc -l || echo 0)
-total_logs=$(ls "$OUTPUT_DIR/logs/"*.log 2>/dev/null | wc -l || echo 0)
+if ls "$OUTPUT_DIR/logs/"*.log 1>/dev/null 2>&1; then
+    total_logs=$(ls "$OUTPUT_DIR/logs/"*.log 2>/dev/null | wc -l | tr -d ' ')
+    success_count=$(grep -l "completed successfully" "$OUTPUT_DIR/logs/"*.log 2>/dev/null | wc -l | tr -d ' ')
+else
+    total_logs=0
+    success_count=0
+fi
 failed_count=$((total_logs - success_count))
 
 echo "Results: $success_count succeeded, $failed_count failed out of $total_logs total"
+
+echo ""
+echo "============== Time Statistics ==============="
+echo "Started:       $BATCH_START_DATETIME"
+echo "Finished:      $BATCH_END_DATETIME"
+echo "Total Time:    ${BATCH_HOURS}h ${BATCH_MINUTES}m ${BATCH_SECONDS}s (${BATCH_DURATION} seconds)"
+if [ "$total_logs" -gt 0 ]; then
+    avg_time=$((BATCH_DURATION / total_logs))
+    echo "Average/Sample: ${avg_time}s (wall clock divided by samples)"
+fi
+echo "=============================================="

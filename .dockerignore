@@ -1,0 +1,71 @@
+# Git
+.git
+.gitignore
+.gitmodules
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+.eggs
+*.egg
+.mypy_cache
+.pytest_cache
+.tox
+.coverage
+htmlcov
+
+# Virtual environments
+venv
+env
+.venv
+.env
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Output directories (large files)
+sim_output/*
+output/*
+!sim_output/.gitkeep
+!output/.gitkeep
+
+# Data directories (mount externally)
+data_new/*
+!data_new/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Large model files (mount externally if needed)
+*.ckpt
+*.pth
+*.pt
+*.safetensors
+
+# Jupyter
+.ipynb_checkpoints
+
+# Documentation
+*.md
+!README.md
+docs/
+figures/
+
+# Docker
+Dockerfile*
+docker-compose*
+.docker*
