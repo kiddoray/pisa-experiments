@@ -104,6 +104,35 @@ run_gpu() {
         "$@"
 }
 
+# Run in Development mode (Mounts current directory to container)
+# Usage: ./docker_build_run.sh dev [command]
+# Example: ./docker_build_run.sh dev python sim_data/run_mixed.py
+dev() {
+    print_info "Running container in DEV mode (Host code mounted): ${FULL_IMAGE}"
+    
+    # Check if NVIDIA runtime is available
+    if docker info 2>/dev/null | grep -q "nvidia"; then
+        GPU_FLAGS="--runtime=nvidia"
+    else
+        GPU_FLAGS=""
+        print_warn "No NVIDIA GPU support detected"
+    fi
+    
+    docker run -it --rm \
+        ${GPU_FLAGS} \
+        --shm-size=16g \
+        -v "${SCRIPT_DIR}:/workspace/pisa-experiments" \
+        -v "${HOST_DATA_DIR}:${HOST_DATA_DIR}:ro" \
+        -e DISPLAY=$DISPLAY \
+        -e NVIDIA_VISIBLE_DEVICES=all \
+        -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display \
+        -e __GLX_VENDOR_LIBRARY_NAME=nvidia \
+        -e XDG_RUNTIME_DIR=/tmp/runtime-root \
+        -v /tmp/.X11-unix:/tmp/.X11-unix \
+        "${FULL_IMAGE}" \
+        "$@"
+}
+
 # Open a shell in the container
 shell() {
     run /bin/bash
